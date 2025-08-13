@@ -10,7 +10,6 @@ import {
   Button,
   BlockStack,
   InlineStack,
-  ProgressBar,
   Banner,
   DropZone,
   Modal,
@@ -26,6 +25,7 @@ import {
 } from '@shopify/polaris-icons'
 import '@shopify/polaris/build/esm/styles.css'
 import { getApiUrl } from './config/api'
+import { createApp } from '@shopify/app-bridge'
 
 interface JobStatus {
   jobId: string;
@@ -50,6 +50,81 @@ function App() {
   const [showTemplateModal, setShowTemplateModal] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [success, setSuccess] = useState<string | null>(null)
+  const [shopDomain, setShopDomain] = useState<string | null>(null)
+  const [isLoading, setIsLoading] = useState(true)
+
+  // Initialize App Bridge
+  useEffect(() => {
+    const urlParams = new URLSearchParams(window.location.search)
+    const shop = urlParams.get('shop')
+    const host = urlParams.get('host')
+    const installed = urlParams.get('installed')
+    
+    console.log('App Bridge initialization - shop:', shop, 'host:', host, 'installed:', installed)
+    
+    // Check if we're in embedded context (has host parameter)
+    if (shop && host) {
+      try {
+        // Initialize App Bridge for embedded app
+        createApp({
+          apiKey: '4af2b9405b392979075ac8e7118ced3b', // Your API key
+          host: host,
+          forceRedirect: false
+        })
+        
+        console.log('App Bridge initialized successfully for embedded app')
+        
+      } catch (error) {
+        console.error('App Bridge initialization failed:', error)
+      }
+    } else {
+      console.log('Not in embedded context - app will work in standalone mode')
+    }
+  }, [])
+
+  // Detect shop context when app loads
+  useEffect(() => {
+    const detectShopContext = () => {
+      // Check if we're in an embedded Shopify app context
+      const urlParams = new URLSearchParams(window.location.search)
+      const shop = urlParams.get('shop')
+      const hmac = urlParams.get('hmac')
+      const host = urlParams.get('host')
+      const timestamp = urlParams.get('timestamp')
+      
+      if (shop) {
+        setShopDomain(shop)
+        console.log('Detected shop domain:', shop)
+        
+        // Check if this is an installation request (has hmac, host, timestamp)
+        if (hmac && host && timestamp) {
+          console.log('Installation request detected, redirecting to OAuth...')
+          // Redirect to OAuth flow
+          window.location.href = `/auth?shop=${shop}`
+          return
+        }
+      } else {
+        // Check if we're in an iframe (embedded app)
+        if (window.self !== window.top) {
+          // We're in an iframe, try to get shop from parent
+          try {
+            const parentParams = new URLSearchParams(window.parent.location.search)
+            const parentShop = parentParams.get('shop')
+            if (parentShop) {
+              setShopDomain(parentShop)
+              console.log('Detected shop domain from parent:', parentShop)
+            }
+          } catch (e) {
+            console.log('Could not access parent window (expected in embedded context)')
+          }
+        }
+      }
+      
+      setIsLoading(false)
+    }
+
+    detectShopContext()
+  }, [])
 
   // Navigation items for the sidebar
   const navigationMarkup = (
@@ -99,6 +174,10 @@ function App() {
 
   const uploadCSV = async () => {
     if (!uploadedFile) return
+    if (!shopDomain) {
+      setError('Shop context not detected. Please ensure you are accessing this app from within Shopify.')
+      return
+    }
 
     setIsUploading(true)
     setError(null)
@@ -124,6 +203,7 @@ function App() {
     try {
       const formData = new FormData()
       formData.append('file', uploadedFile)
+      formData.append('shop', shopDomain)
 
       const response = await fetch(getApiUrl('imageUploader', 'uploadCsv'), {
         method: 'POST',
@@ -175,7 +255,12 @@ function App() {
 
   const checkJobStatus = async (jobId: string) => {
     try {
-      const response = await fetch(getApiUrl('imageUploader', 'jobStatus', { jobId }))
+      if (!shopDomain) {
+        throw new Error('Shop context not detected')
+      }
+      
+      const statusUrl = getApiUrl('imageUploader', 'jobStatus', { jobId })
+      const response = await fetch(`${statusUrl}?shop=${encodeURIComponent(shopDomain)}`)
       const result = await response.json()
 
       if (!response.ok) {
@@ -222,9 +307,14 @@ function App() {
 
   const downloadFailedProducts = async () => {
     if (!currentJob?.errors.failedProductsUrl) return
+    if (!shopDomain) {
+      setError('Shop context not detected')
+      return
+    }
 
     try {
-      const response = await fetch(getApiUrl('imageUploader', 'downloadFailed', { jobId: currentJob.jobId }))
+      const downloadUrl = getApiUrl('imageUploader', 'downloadFailed', { jobId: currentJob.jobId })
+      const response = await fetch(`${downloadUrl}?shop=${encodeURIComponent(shopDomain)}`)
       const blob = await response.blob()
       
       const url = window.URL.createObjectURL(blob)
@@ -287,6 +377,9 @@ example-product,Example Product,,,,"https://example.com/variant2.jpg",SKU002,Blu
                   <Text variant="bodyMd" as="p" tone="subdued">
                     Manage your product automations from this dashboard. Choose an automation from the sidebar to get started.
                   </Text>
+                  <Banner tone="info">
+                    <p>Connected to: <strong>{shopDomain}</strong></p>
+                  </Banner>
                 </BlockStack>
               </Card>
             </Layout.Section>
@@ -539,6 +632,61 @@ example-product,Example Product,,,,"https://example.com/variant2.jpg",SKU002,Blu
         return null
     }
   }
+
+  // Show loading state while detecting shop context
+  if (isLoading) {
+    return (
+      <AppProvider i18n={{}}>
+        <Frame>
+          <Page title="Shopify Automations Dashboard">
+            <Layout>
+              <Layout.Section>
+                <Card>
+                  <BlockStack gap="400" align="center">
+                    <Spinner size="large" />
+                    <Text variant="bodyMd" as="p">
+                      Detecting shop context...
+                    </Text>
+                  </BlockStack>
+                </Card>
+              </Layout.Section>
+            </Layout>
+          </Page>
+        </Frame>
+      </AppProvider>
+    )
+  }
+
+  // Show error if no shop context detected
+  if (!shopDomain) {
+    return (
+      <AppProvider i18n={{}}>
+        <Frame>
+          <Page title="Shopify Automations Dashboard">
+            <Layout>
+              <Layout.Section>
+                <Card>
+                  <BlockStack gap="400">
+                    <Banner tone="critical">
+                      <p>Shop context not detected. Please ensure you are accessing this app from within your Shopify admin.</p>
+                    </Banner>
+                    <Text variant="bodyMd" as="p">
+                      This app must be accessed through the Shopify admin interface to function properly.
+                    </Text>
+                    <Text variant="bodyMd" as="p">
+                      If you're testing, you can add ?shop=your-store.myshopify.com to the URL.
+                    </Text>
+                  </BlockStack>
+                </Card>
+              </Layout.Section>
+            </Layout>
+          </Page>
+        </Frame>
+      </AppProvider>
+    )
+  }
+
+
 
   return (
     <AppProvider i18n={{}}>
